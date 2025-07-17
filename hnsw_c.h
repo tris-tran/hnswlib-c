@@ -18,20 +18,36 @@ extern "C" {
 
 typedef void* hnsw_index_t;
 
-hnsw_index_t hnsw_create_new_index(char* spaceName, int dimension);
-int hnws_init_new_index(hnsw_index_t index, int maxNumberOfElements, int M, int efConstruction, int randomSeed);
+hnsw_index_t hnsw_create_new_index(char* spaceName,
+				   int dimension);
+int hnws_init_new_index(hnsw_index_t index,
+			int maxNumberOfElements,
+			int M,
+			int efConstruction,
+			int randomSeed);
 
-int hnws_set_ef(hnsw_index_t index, int ef);
-
-int hnws_add_item_to_index(float* item, int normalized, int label, hnsw_index_t index);
+int hnws_set_ef(hnsw_index_t index,
+		int ef);
 
 int hnws_clear_index(hnsw_index_t idx);
 
+int hnws_add_item_to_index(float* item,
+			   int size,
+			   int normalized,
+			   int label,
+			   hnsw_index_t index);
+
 void hnsw_add_point(hnsw_index_t index, const float* vector, int label);
-int hnsw_search(hnsw_index_t index, const float* vector, int k, int* result_labels, float* distances);
-void hnsw_save_index(hnsw_index_t index, const char* path);
-void hnsw_load_index(hnsw_index_t index, const char* path);
-void hnsw_free_index(hnsw_index_t index);
+  
+int hnws_knn_query(hnsw_index_t index,
+		   float* input,
+		   int normalized,
+		   int k,
+		   int* indices /* output */,
+		   float* coefficients /* output */);
+
+int hnws_save_index(hnsw_index_t index, char* path);
+int hnws_load_index(hnsw_index_t idx, size_t maxNumberOfElements, char* path);
 
 #ifdef __cplusplus
 }

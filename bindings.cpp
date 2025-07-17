@@ -7,6 +7,8 @@
  * The multithread support can be used and handled on the Java side.
  * 
  * This work is still in progress. Please feel free to contribute and give ideas.
+ *
+ * - Modified by Tristan O. 2025/06/18: refactored C bingings
  */
 
 #include <iostream>
@@ -40,268 +42,270 @@
 template<typename dist_t, typename data_t=float>
 class Index {
 public:
-    Index(const std::string &space_name, const int dim) :
-            space_name(space_name), dim(dim) {
-        data_must_be_normalized = false;
-        if(space_name=="L2") {
-            l2space = new hnswlib::L2Space(dim);
-        } else if(space_name=="IP") {
-            l2space = new hnswlib::InnerProductSpace(dim);
-        } else if(space_name=="COSINE") {
-            l2space = new hnswlib::InnerProductSpace(dim);
-            data_must_be_normalized = true;
-        }
-        appr_alg = NULL;
-        index_initialized = false;
-        index_cleared = false;
+  Index(const std::string &space_name, const int dim) :
+    space_name(space_name), dim(dim) {
+    data_must_be_normalized = false;
+    if(space_name=="L2") {
+      l2space = new hnswlib::L2Space(dim);
+    } else if(space_name=="IP") {
+      l2space = new hnswlib::InnerProductSpace(dim);
+    } else if(space_name=="COSINE") {
+      l2space = new hnswlib::InnerProductSpace(dim);
+      data_must_be_normalized = true;
     }
+    appr_alg = NULL;
+    index_initialized = false;
+    index_cleared = false;
+  }
 
-    int init_new_index(const size_t maxElements, const size_t M, const size_t efConstruction, const size_t random_seed) {
-        TRY_CATCH_NO_INITIALIZE_CHECK_AND_RETURN_INT_BLOCK({
-            if (appr_alg) {
-                return RESULT_INDEX_ALREADY_INITIALIZED;
-            }
-            appr_alg = new hnswlib::HierarchicalNSW<dist_t>(l2space, maxElements, M, efConstruction, random_seed);
-            index_initialized = true;
-        });
+  int init_new_index(const size_t maxElements, const size_t M, const size_t efConstruction, const size_t random_seed) {
+    TRY_CATCH_NO_INITIALIZE_CHECK_AND_RETURN_INT_BLOCK({
+	if (appr_alg) {
+	  return RESULT_INDEX_ALREADY_INITIALIZED;
+	}
+	appr_alg = new hnswlib::HierarchicalNSW<dist_t>(l2space, maxElements, M, efConstruction, random_seed);
+	index_initialized = true;
+      });
+  }
+
+  int set_ef(size_t ef) {
+    TRY_CATCH_RETURN_INT_BLOCK({
+	appr_alg->ef_ = ef;
+      });
+  }
+
+  int get_ef() {
+    return appr_alg->ef_;
+  }
+
+  int get_ef_construction() {
+    return appr_alg->ef_construction_;
+  }
+
+  int get_M() {
+    return appr_alg->M_;
+  }
+
+  int save_index(const std::string &path_to_index) {
+    TRY_CATCH_RETURN_INT_BLOCK({
+	appr_alg->saveIndex(path_to_index);
+      });
+  }
+
+  int load_index(const std::string &path_to_index, size_t max_elements) {
+    TRY_CATCH_NO_INITIALIZE_CHECK_AND_RETURN_INT_BLOCK({
+	if (appr_alg) {
+	  std::cerr << "Warning: Calling load_index for an already initialized index. Old index is being deallocated.";
+	  delete appr_alg;
+	}
+	appr_alg = new hnswlib::HierarchicalNSW<dist_t>(l2space, path_to_index, false, max_elements);
+      });
+  }
+
+  void normalize_array(float* array){
+    float norm = 0.0f;
+    for (int i=0; i<dim; i++) {
+      norm += (array[i] * array[i]);
     }
-
-    int set_ef(size_t ef) {
-     	TRY_CATCH_RETURN_INT_BLOCK({
-        	appr_alg->ef_ = ef;
-    	});
+    norm = 1.0f / (sqrtf(norm) + 1e-30f);
+    for (int i=0; i<dim; i++) {
+      array[i] = array[i] * norm;
     }
+  }
 
-   	int get_ef() {
-   		return appr_alg->ef_;
-   	}
+  int add_item(float* item, bool item_normalized, int id) {
+    TRY_CATCH_RETURN_INT_BLOCK({
+	if (get_current_count() >= get_max_elements()) {
+	  return RESULT_ITEM_CANNOT_BE_INSERTED_INTO_THE_VECTOR_SPACE;
+	}            
+	if ((data_must_be_normalized == true) && (item_normalized == false)) {
+	  normalize_array(item);                
+	}
+	int current_id = id != -1 ? id : incremental_id++;             
+	appr_alg->addPoint(item, current_id);                
+      });
+  }
 
-    int get_ef_construction() {
-        return appr_alg->ef_construction_;
+  int hasId(int id) {
+    TRY_CATCH_RETURN_INT_BLOCK({
+	int label_c;
+	auto search = (appr_alg->label_lookup_.find(id));
+	if (search == (appr_alg->label_lookup_.end()) || (appr_alg->isMarkedDeleted(search->second))) {
+	  return RESULT_ID_NOT_IN_INDEX;
+	}
+      });
+  }
+
+  int getDataById(int id, float* data, int dim) {
+    TRY_CATCH_RETURN_INT_BLOCK({
+	int label_c;
+	auto search = (appr_alg->label_lookup_.find(id));
+	if (search == (appr_alg->label_lookup_.end()) || (appr_alg->isMarkedDeleted(search->second))) {
+	  return RESULT_ID_NOT_IN_INDEX;
+	}
+	label_c = search->second;
+	char* data_ptrv = (appr_alg->getDataByInternalId(label_c));
+	float* data_ptr = (float*) data_ptrv;
+	for (int i = 0; i < dim; i++) {
+	  data[i] = *data_ptr;
+	  data_ptr += 1;
+	}
+      });
+  }
+
+  float compute_similarity(float* vector1, float* vector2) {
+    float similarity;
+    try {
+      similarity = (appr_alg->fstdistfunc_(vector1, vector2, (appr_alg -> dist_func_param_)));
+    } catch (...) {
+      similarity = NAN;
     }
+    return similarity;
+  }
 
-    int get_M() {
-        return appr_alg->M_;
-    }
+  int knn_query(float* input, bool input_normalized, int k, int* indices /* output */, float* coefficients /* output */) {
+    std::priority_queue<std::pair<dist_t, hnswlib::labeltype >> result;
+    TRY_CATCH_RETURN_INT_BLOCK({
+	if ((data_must_be_normalized == true) && (input_normalized == false)) {
+	  normalize_array(input);
+	}
+	result = appr_alg->searchKnn((void*) input, k);
+	if (result.size() != k)
+	  return RESULT_QUERY_CANNOT_RETURN;
+	for (int i = k - 1; i >= 0; i--) {
+	  auto &result_tuple = result.top();
+	  coefficients[i] = result_tuple.first;
+	  indices[i] = result_tuple.second;
+	  result.pop();
+	}       
+      });
+  }
 
-    int save_index(const std::string &path_to_index) {
-        TRY_CATCH_RETURN_INT_BLOCK({
-            appr_alg->saveIndex(path_to_index);
-        });
-    }
+  int mark_deleted(int label) {
+    TRY_CATCH_RETURN_INT_BLOCK({
+	appr_alg->markDelete(label);
+      });
+  }
 
-    int load_index(const std::string &path_to_index, size_t max_elements) {
-        TRY_CATCH_NO_INITIALIZE_CHECK_AND_RETURN_INT_BLOCK({
-            if (appr_alg) {
-                std::cerr << "Warning: Calling load_index for an already initialized index. Old index is being deallocated.";
-                delete appr_alg;
-            }
-            appr_alg = new hnswlib::HierarchicalNSW<dist_t>(l2space, path_to_index, false, max_elements);
-        });
-    }
+  void resize_index(size_t new_size) {
+    appr_alg->resizeIndex(new_size);
+  }
 
-	void normalize_array(float* array){
-        float norm = 0.0f;
-        for (int i=0; i<dim; i++) {
-            norm += (array[i] * array[i]);
-        }
-        norm = 1.0f / (sqrtf(norm) + 1e-30f);
-        for (int i=0; i<dim; i++) {
-            array[i] = array[i] * norm;
-        }
-    }
+  int get_max_elements() const {
+    return appr_alg->max_elements_;
+  }
 
-    int add_item(float* item, bool item_normalized, int id) {
-        TRY_CATCH_RETURN_INT_BLOCK({
-            if (get_current_count() >= get_max_elements()) {
-                return RESULT_ITEM_CANNOT_BE_INSERTED_INTO_THE_VECTOR_SPACE;
-            }            
-            if ((data_must_be_normalized == true) && (item_normalized == false)) {
-                normalize_array(item);                
-            }
-            int current_id = id != -1 ? id : incremental_id++;             
-            appr_alg->addPoint(item, current_id);                
-        });
-    }
+  int get_current_count() const {
+    return appr_alg->cur_element_count;
+  }
 
-    int hasId(int id) {
-    	TRY_CATCH_RETURN_INT_BLOCK({
-    		int label_c;
-			auto search = (appr_alg->label_lookup_.find(id));
-			if (search == (appr_alg->label_lookup_.end()) || (appr_alg->isMarkedDeleted(search->second))) {
-				return RESULT_ID_NOT_IN_INDEX;
-			}
-		});
-    }
+  int clear_index() {
+    TRY_CATCH_NO_INITIALIZE_CHECK_AND_RETURN_INT_BLOCK({
+	delete l2space;
+	if (appr_alg)
+	  delete appr_alg;
+	index_cleared = true;
+      });
+  }
 
-    int getDataById(int id, float* data, int dim) {
-    	TRY_CATCH_RETURN_INT_BLOCK({
-			int label_c;
-			auto search = (appr_alg->label_lookup_.find(id));
-			if (search == (appr_alg->label_lookup_.end()) || (appr_alg->isMarkedDeleted(search->second))) {
-				return RESULT_ID_NOT_IN_INDEX;
-			}
-			label_c = search->second;
-			char* data_ptrv = (appr_alg->getDataByInternalId(label_c));
-			float* data_ptr = (float*) data_ptrv;
-			for (int i = 0; i < dim; i++) {
-				data[i] = *data_ptr;
-				data_ptr += 1;
-			}
-		});
-    }
+  std::string space_name;
+  int dim;
+  bool index_cleared;
+  bool index_initialized;
+  bool data_must_be_normalized;
+  std::atomic<unsigned long> incremental_id{0};
+  hnswlib::HierarchicalNSW<dist_t> *appr_alg;
+  hnswlib::SpaceInterface<float> *l2space;
 
-    float compute_similarity(float* vector1, float* vector2) {
-    	float similarity;
-        try {
-        	similarity = (appr_alg->fstdistfunc_(vector1, vector2, (appr_alg -> dist_func_param_)));
-        } catch (...) {
-        	similarity = NAN;
-        }
-    	return similarity;
-    }
-
-    int knn_query(float* input, bool input_normalized, int k, int* indices /* output */, float* coefficients /* output */) {
-        std::priority_queue<std::pair<dist_t, hnswlib::labeltype >> result;
-        TRY_CATCH_RETURN_INT_BLOCK({
-            if ((data_must_be_normalized == true) && (input_normalized == false)) {
-                normalize_array(input);
-            }
-            result = appr_alg->searchKnn((void*) input, k);
-            if (result.size() != k)
-                return RESULT_QUERY_CANNOT_RETURN;
-            for (int i = k - 1; i >= 0; i--) {
-                auto &result_tuple = result.top();
-                coefficients[i] = result_tuple.first;
-                indices[i] = result_tuple.second;
-                result.pop();
-            }       
-        });
-    }
-
-    int mark_deleted(int label) {
-        TRY_CATCH_RETURN_INT_BLOCK({
-        	appr_alg->markDelete(label);
-        });
-    }
-
-    void resize_index(size_t new_size) {
-        appr_alg->resizeIndex(new_size);
-    }
-
-    int get_max_elements() const {
-        return appr_alg->max_elements_;
-    }
-
-    int get_current_count() const {
-        return appr_alg->cur_element_count;
-    }
-
-    int clear_index() {
-    	TRY_CATCH_NO_INITIALIZE_CHECK_AND_RETURN_INT_BLOCK({
-			delete l2space;
-			if (appr_alg)
-				delete appr_alg;
-			index_cleared = true;
-        });
-    }
-
-    std::string space_name;
-    int dim;
-    bool index_cleared;
-    bool index_initialized;
-    bool data_must_be_normalized;
-    std::atomic<unsigned long> incremental_id{0};
-    hnswlib::HierarchicalNSW<dist_t> *appr_alg;
-    hnswlib::SpaceInterface<float> *l2space;
-
-    ~Index() {
-        clear_index();
-    }
+  ~Index() {
+    clear_index();
+  }
 };
 
 EXTERN_C DLLEXPORT void *hnsw_create_new_index(char* spaceName, int dimension){
-    Index<float>* index;
-    try {
-        index = new Index<float>(spaceName, dimension);
-    } catch (const std::exception& e) {
-        printf("Exception: %s\n", e.what());
-        index = NULL;
-    } catch (...) {
-        printf("Unknown exception\n");
-        index = NULL;
-    } 
-    printf("RETURNING INDEX\n");
-    return index;
+  Index<float>* index;
+  try {
+    index = new Index<float>(spaceName, dimension);
+  } catch (const std::exception& e) {
+    index = NULL;
+  } catch (...) {
+    index = NULL;
+  } 
+  return index;
 }
 
 EXTERN_C DLLEXPORT int hnws_init_new_index(void* idx, int maxNumberOfElements, int M, int efConstruction, int randomSeed) {
-    auto* index = static_cast<Index<float>*>(idx);
-    printf("Casting ok...\n");
-    return index->init_new_index(maxNumberOfElements, M, efConstruction, randomSeed);
+  auto* index = static_cast<Index<float>*>(idx);
+  return index->init_new_index(maxNumberOfElements, M, efConstruction, randomSeed);
 } 
 
-EXTERN_C DLLEXPORT int hnws_add_item_to_index(float* item, int normalized, int label, void* idx) {
-    auto* index = static_cast<Index<float>*>(idx);
-    return index->add_item(item, normalized, label);
+EXTERN_C DLLEXPORT int hnws_add_item_to_index(float* item, int size, int normalized, int label, void* idx) {
+  auto* index = static_cast<Index<float>*>(idx);
+  if (size != index->dim) {
+    return -1;
+  }
+  return index->add_item(item, normalized, label);
 }
 
 EXTERN_C DLLEXPORT int getIndexLength(Index<float>* index) {
-    if (index->appr_alg) {
-        return index->appr_alg->cur_element_count;
-    } else {
-        return 0;
-    }
+  if (index->appr_alg) {
+    return index->appr_alg->cur_element_count;
+  } else {
+    return 0;
+  }
 }
 
-EXTERN_C DLLEXPORT int saveIndexToPath(Index<float>* index, char* path) {
-    std::string path_string(path);
-    return index->save_index(path_string);
+EXTERN_C DLLEXPORT int hnws_save_index(void* idx, char* path) {
+  auto* index = static_cast<Index<float>*>(idx);
+  std::string path_string(path);
+  return index->save_index(path_string);
 }
 
-EXTERN_C DLLEXPORT int loadIndexFromPath(Index<float>* index, size_t maxNumberOfElements, char* path) {
-    std::string path_string(path);
-    return index->load_index(path_string, maxNumberOfElements);
+EXTERN_C DLLEXPORT int hnws_load_index(void* idx, size_t maxNumberOfElements, char* path) {
+  auto* index = static_cast<Index<float>*>(idx);
+  std::string path_string(path);
+  return index->load_index(path_string, maxNumberOfElements);
 }
 
-EXTERN_C DLLEXPORT int knnQuery(Index<float>* index, float* input, int normalized, int k, int* indices /* output */, float* coefficients /* output */) {
-    return index->knn_query(input, normalized, k, indices, coefficients);
+EXTERN_C DLLEXPORT int hnws_knn_query(void* idx, float* input, int normalized, int k, int* indices /* output */, float* coefficients /* output */) {
+  auto* index = static_cast<Index<float>*>(idx);
+  return index->knn_query(input, normalized, k, indices, coefficients);
 }
 
 EXTERN_C DLLEXPORT int hnws_clear_index(void* idx) {
-    auto* index = static_cast<Index<float>*>(idx);
-    return index->clear_index();
+  auto* index = static_cast<Index<float>*>(idx);
+  return index->clear_index();
 }
 
 EXTERN_C DLLEXPORT int hnws_set_ef(void* idx, int ef) {
-    auto* index = static_cast<Index<float>*>(idx);
-    return index->set_ef(ef);
+  auto* index = static_cast<Index<float>*>(idx);
+  return index->set_ef(ef);
 }
 
 EXTERN_C DLLEXPORT int getData(Index<float>* index, int id, float* vector, int dim) {
-	return index->getDataById(id, vector, dim);
+  return index->getDataById(id, vector, dim);
 }
 
 EXTERN_C DLLEXPORT int hasId(Index<float>* index, int id) {
-	return index->hasId(id);
+  return index->hasId(id);
 }
 
 EXTERN_C DLLEXPORT float computeSimilarity(Index<float>* index, float* vector1, float* vector2) {
-	return index->compute_similarity(vector1, vector2);
+  return index->compute_similarity(vector1, vector2);
 }
 
 EXTERN_C DLLEXPORT int getM(Index<float>* index) {
-    return index->get_M();
+  return index->get_M();
 }
 
 EXTERN_C DLLEXPORT int getEfConstruction(Index<float>* index) {
-    return index->get_ef_construction();
+  return index->get_ef_construction();
 }
 
 EXTERN_C DLLEXPORT int getEf(Index<float>* index) {
-    return index->get_ef();
+  return index->get_ef();
 }
 
 EXTERN_C DLLEXPORT int markDeleted(Index<float>* index, int id) {
-    return index->mark_deleted(id);
+  return index->mark_deleted(id);
 }

@@ -41,7 +41,6 @@ namespace hnswlib {
             ef_construction_ = std::max(ef_construction,M_);
             ef_ = 10;
 
-        printf("CREATING HERARCHICAL\n");
 
             level_generator_.seed(random_seed);
             update_probability_generator_.seed(random_seed + 1);

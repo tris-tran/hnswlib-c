@@ -67,9 +67,6 @@ namespace hnswlib {
             memcpy(data_ + size_per_element_ * idx + data_size_, &label, sizeof(labeltype));
             memcpy(data_ + size_per_element_ * idx, datapoint, data_size_);
 
-
-
-
         };
 
         void removePoint(labeltype cur_external) {
